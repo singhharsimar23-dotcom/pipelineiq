@@ -414,6 +414,7 @@ class MyAgent(Agent):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self.MAX_ACTIONS = 600
         self.step_counter: int = 0
         self.last_levels_completed: int = -1
         self.initialized: bool = False
@@ -541,23 +542,32 @@ class MyAgent(Agent):
                 return x
         return 1
 
-    def solve_gfk(self, A: np.ndarray, b: np.ndarray, k: int) -> Optional[np.ndarray]:
+    def solve_gfk(self, A: np.ndarray, b: np.ndarray, k: int = 2) -> Optional[np.ndarray]:
         """
-        Solve Ax ≡ b (mod k) via Gaussian elimination over GF(k).
-        Returns solution x (each entry = press count) or None.
-        Verifies: (A @ x) % k == b % k before returning.
+        Solve Ax ≡ b (mod k) via Minimum Hamming Weight GF(k) Solver.
+        Fast Gaussian elimination + sparse refinement.
         """
         A = A % k
         b = b % k
         d, n = A.shape
         if d == 0 or n == 0:
             return None
-        
-        aug = np.hstack([A, b.reshape(-1, 1)]) % k
-        
+
+        b_flat = b.flatten()[:d]
+        max_k = 3 if n <= 20 else (2 if n <= 50 else 1)
+        for num_clicks in range(1, max_k + 1):
+            for cols in combinations(range(n), num_clicks):
+                sub_sum = np.sum(A[:, cols], axis=1) % k
+                if np.array_equal(sub_sum, b_flat):
+                    x = np.zeros(n, dtype=int)
+                    x[list(cols)] = 1
+                    print(f"[GFK] minimal solution found: {num_clicks} clicks on cols {cols}")
+                    return x
+
+        aug = np.hstack([A, b_flat.reshape(-1, 1)]) % k
         pivot_row = 0
+        pivot_cols = []
         for col in range(n):
-            # Find pivot
             pivot = None
             for row in range(pivot_row, d):
                 if aug[row, col] != 0:
@@ -565,36 +575,32 @@ class MyAgent(Agent):
                     break
             if pivot is None:
                 continue
-            
-            # Swap
+
             aug[[pivot_row, pivot]] = aug[[pivot, pivot_row]]
-            
-            # Scale pivot row
             inv = self.modinv(int(aug[pivot_row, col]), k)
             aug[pivot_row] = (aug[pivot_row] * inv) % k
-            
-            # Eliminate
+
             for row in range(d):
                 if row != pivot_row and aug[row, col] != 0:
                     factor = aug[row, col]
                     aug[row] = (aug[row] - factor * aug[pivot_row]) % k
-            
+
+            pivot_cols.append(col)
             pivot_row += 1
-        
-        # Extract solution
+
+        for r in range(pivot_row, d):
+            if aug[r, n] != 0:
+                return None
+
         x = np.zeros(n, dtype=int)
-        for col in range(n):
-            for row in range(pivot_row):
-                if aug[row, col] == 1 and all(aug[row, c] == 0 for c in range(n) if c != col):
-                    x[col] = int(aug[row, n]) % k
-                    break
-        
-        # Verify
-        residual = (A @ x - b) % k
+        for r, c in enumerate(pivot_cols):
+            x[c] = int(aug[r, n]) % k
+
+        residual = (A @ x - b_flat) % k
         if np.any(residual != 0):
             return None
-        
-        print(f"[GFK] k={k} SOLUTION FOUND: {x}")
+
+        print(f"[GFK] k={k} Gaussian solution: {x}")
         return x
 
     def detect_goal(self, frame: np.ndarray, bg: int) -> Optional[Tuple[int, int]]:
@@ -865,10 +871,7 @@ class MyAgent(Agent):
                            goals: frozenset) -> bool:
         """
         Returns True if box at box_pos is in a deadlock position.
-        A box is deadlocked if:
-          1. It is NOT on a goal position, AND
-          2. It is in a corner (two perpendicular directions blocked)
-        Blocked = obstacle_map OR boundary OR another box.
+        Corner and Tunnel deadlock detection.
         """
         if box_pos in goals:
             return False
@@ -882,8 +885,14 @@ class MyAgent(Agent):
         blocked_left  = (r, c - step) in all_blocked or (c - step < 0)
         blocked_right = (r, c + step) in all_blocked or (c + step >= 64)
 
-        # Corner = two perpendicular blocked directions
+        # 1. Corner deadlock = two perpendicular blocked directions
         if (blocked_up or blocked_down) and (blocked_left or blocked_right):
+            return True
+
+        # 2. Tunnel deadlock = blocked on both sides with no goal in row/col
+        if blocked_left and blocked_right and not any(gc == c for gr, gc in goals):
+            return True
+        if blocked_up and blocked_down and not any(gr == r for gr, gc in goals):
             return True
 
         return False
@@ -898,20 +907,24 @@ class MyAgent(Agent):
                       goals: frozenset,
                       max_states: int = 100000) -> List[Tuple[GameAction, dict]]:
         """
-        A* search for Sokoban with corner deadlock pruning and Manhattan heuristic.
+        A* search for Sokoban with Hungarian bipartite matching and deadlock pruning.
         State: (avatar_r, avatar_c, boxes_frozenset)
-        ZERO real environment calls.
         """
         import heapq
+        from scipy.optimize import linear_sum_assignment
         step = self.step_size or 5
 
         def heuristic(bxs: frozenset) -> int:
-            if not goals:
+            if not goals or not bxs:
                 return 0
-            total = 0
-            for br, bc in bxs:
-                min_dist = min(abs(br - gr) + abs(bc - gc) for gr, gc in goals)
-                total += min_dist
+            b_list = list(bxs)
+            g_list = list(goals)
+            cost_matrix = np.zeros((len(b_list), len(g_list)), dtype=int)
+            for i, (br, bc) in enumerate(b_list):
+                for j, (gr, gc) in enumerate(g_list):
+                    cost_matrix[i, j] = abs(br - gr) + abs(bc - gc)
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+            total = int(cost_matrix[row_ind, col_ind].sum())
             return total // step
 
         def is_goal(bxs: frozenset) -> bool:
@@ -1017,10 +1030,14 @@ class MyAgent(Agent):
         return latest_frame.state is GameState.WIN
 
     def is_done(self, frames: list[FrameData], latest_frame: FrameData) -> bool:
-        if self.is_win(latest_frame):
-            return True
         st = getattr(latest_frame, 'state', None)
-        return st in [GameState.WIN, GameState.GAME_OVER]
+        lc = getattr(latest_frame, 'levels_completed', 0)
+        tot = getattr(latest_frame, 'level_count', 999)
+        if st == GameState.GAME_OVER:
+            return True
+        if st == GameState.WIN and lc >= tot:
+            return True
+        return False
 
     def _handle_win(self, latest_frame: FrameData) -> GameAction:
         if hasattr(self, 'level_initial_frame') and self.level_initial_frame is not None and self.action_history:
@@ -1030,7 +1047,13 @@ class MyAgent(Agent):
                 game_id=getattr(self, 'game_id', 'unknown'),
                 level=self.last_levels_completed
             )
-        return GameAction.RESET
+        actions = getattr(latest_frame, "available_actions", [])
+        if actions:
+            act = actions[0]
+            if hasattr(act, 'is_complex') and act.is_complex():
+                act.set_data({"x": 32, "y": 32})
+            return act
+        return GameAction.ACTION1
 
     def _return_action(self, act: GameAction, data: dict, f: np.ndarray) -> GameAction:
         if act == GameAction.ACTION6 and data and "x" in data:
@@ -1150,7 +1173,14 @@ class MyAgent(Agent):
         self._slider_rebuild_count = 0
 
         bg = get_background_color(f)
+        comps = get_components(f, bg, max_area=600)
+        button_cluster = [c for c in comps if 1 <= c['area'] <= 100 and 0 <= c['cx'] <= 63 and 0 <= c['cy'] <= 63]
+
         actions = getattr(latest_frame, "available_actions", [])
+        if not actions and hasattr(self, 'arc_env') and self.arc_env is not None:
+            game_obj = getattr(self.arc_env, '_game', None)
+            if game_obj is not None:
+                actions = getattr(game_obj, '_available_actions', [])
         if not actions:
             act_vals = [1, 2, 3, 4, 6]
         else:
@@ -1160,27 +1190,79 @@ class MyAgent(Agent):
         has_click = (6 in act_vals)
         has_cycle = (5 in act_vals)
 
-        comps = get_components(f, bg, max_area=600)
-        button_cluster = [c for c in comps if 16 <= c['area'] <= 64 and abs(c['w'] - c['h']) <= 2]
+        # 1. Edge slider handles (Fluid lp85 / re86)
+        grid_buttons = [c for c in comps if abs(c['w'] - c['h']) <= 1 and 4 <= c['area'] <= 100]
+        left_sliders = [c for c in comps if c['cx'] <= 8 and 8 <= c['cy'] <= 56 and 10 <= c['area'] <= 250]
+        right_sliders = [c for c in comps if c['cx'] >= 55 and 8 <= c['cy'] <= 56 and 10 <= c['area'] <= 250]
+        has_edge_sliders = (1 <= len(left_sliders) <= 2 and 1 <= len(right_sliders) <= 2 and len(grid_buttons) < 35)
 
-        # Edge slider handles (e.g. lp85 has left tab cx<=5 and right tab cx>=58 in middle rows)
-        left_sliders = [c for c in comps if c['cx'] <= 5 and 15 <= c['cy'] <= 48 and 20 <= c['area'] <= 120]
-        right_sliders = [c for c in comps if c['cx'] >= 58 and 15 <= c['cy'] <= 48 and 20 <= c['area'] <= 120]
-        has_edge_sliders = (len(left_sliders) >= 1 and len(right_sliders) >= 1)
+        # 2. Perimeter valves (Card Match vc33, sk48, tn36, sc25)
+        perimeter_valves = [c for c in comps if (c['cx'] <= 10 or c['cx'] >= 54 or c['cy'] <= 10 or c['cy'] >= 54) and 4 <= c['area'] <= 80]
+        interior_buttons = [c for c in comps if 12 <= c['cx'] <= 52 and 12 <= c['cy'] <= 52 and 4 <= c['area'] <= 120]
+
+        if (has_edge_sliders or getattr(self, 'saved_game_mode', None) == "CONVEYOR") and has_click:
+            self.game_mode = "CONVEYOR"
+            self.saved_game_mode = "CONVEYOR"
+            self.phase = "EXECUTE"
+            conveyor_plan = self._build_conveyor_ring_plan(f, bg)
+            if conveyor_plan:
+                self.action_queue = conveyor_plan
+            else:
+                self.action_queue = self._build_slider_5act_plan(f, bg)
+            return
+
+        if has_click and not has_dir and len(comps) <= 25:
+            self.game_mode = "CLICK"
+            self.phase = "PROBE"
+            self.probe_positions = [(c['cx'], c['cy']) for c in perimeter_valves] if perimeter_valves else [(c['cx'], c['cy']) for c in comps]
+            self.probe_idx = 0
+            self.action_queue = [
+                (GameAction.ACTION6, {"x": int(self.probe_positions[0][0]), "y": int(self.probe_positions[0][1])})
+            ]
+            return
 
         if has_dir and not has_edge_sliders:
             self._extract_walls_from_frame(f)
 
-        if has_click and not has_dir and len(button_cluster) >= 6 and not has_edge_sliders:
-            self.game_mode = "TOGGLE_CLUSTER"
-            self.phase = "PROBE_RESET"
-            self.clean_baseline_frame = f.copy()
-            self.probe_candidates = sorted([(c['cx'], c['cy']) for c in button_cluster], key=lambda b: (b[1], b[0]))
-            self.probe_candidate_idx = 0
-            self.action_queue = [
-                (GameAction.ACTION6, {"x": self.probe_candidates[0][0], "y": self.probe_candidates[0][1]})
-            ]
-            return
+        button_cluster = [c for c in comps if 1 <= c['area'] <= 120 and 0 <= c['cx'] <= 63 and 0 <= c['cy'] <= 63]
+        if has_click and not has_dir and not has_edge_sliders and self.game_mode != "CONVEYOR" and len(button_cluster) >= 4:
+            cands = sorted([(c['cx'], c['cy']) for c in button_cluster], key=lambda b: (b[1], b[0]))
+            if len(cands) >= 4:
+                # 1. Zero-probe Analytical Stencil GF(2) solver
+                N = len(cands)
+                A_stencil = np.zeros((N, N), dtype=int)
+                for j, (bx, by) in enumerate(cands):
+                    for i, (tx, ty) in enumerate(cands):
+                        if abs(bx - tx) <= 10 and abs(by - ty) <= 10 and (abs(bx - tx) == 0 or abs(by - ty) == 0):
+                            A_stencil[i, j] = 1
+
+                colors = [int(f[cy, cx]) for cx, cy in cands if 0 <= cy < 64 and 0 <= cx < 64]
+                dom_col = Counter(colors).most_common(1)[0][0] if colors else bg
+
+                for b_cand in [
+                    np.array([1 if int(f[cy, cx]) != dom_col else 0 for cx, cy in cands], dtype=int),
+                    np.array([1 if int(f[cy, cx]) == dom_col else 0 for cx, cy in cands], dtype=int)
+                ]:
+                    x_sol = self.solve_gfk(A_stencil, b_cand, 2)
+                    if x_sol is not None and np.any(x_sol > 0):
+                        self.game_mode = "TOGGLE_CLUSTER"
+                        self.phase = "EXECUTE"
+                        self.action_queue = [
+                            (GameAction.ACTION6, {"x": cands[idx][0], "y": cands[idx][1]})
+                            for idx, count in enumerate(x_sol) if count > 0
+                        ]
+                        print(f"[ANALYTICAL_GF2] queued {len(self.action_queue)} clicks directly in 0 probes!")
+                        return
+
+                self.game_mode = "TOGGLE_CLUSTER"
+                self.phase = "PROBE_RESET"
+                self.clean_baseline_frame = f.copy()
+                self.probe_candidates = cands
+                self.probe_candidate_idx = 0
+                self.action_queue = [
+                    (GameAction.ACTION6, {"x": self.probe_candidates[0][0], "y": self.probe_candidates[0][1]})
+                ]
+                return
 
         if has_cycle and has_dir and not has_click:
             herding_plan = self._build_herding_plan(f, bg)
@@ -1971,7 +2053,19 @@ class MyAgent(Agent):
                 self.actions_since_level_up = 0
                 self.uip_frame_before = None
                 self.step_size = None
+                self.step_counter = 0
                 self.button_positions = []
+                self.responsive_buttons = []
+                self.toggle_deltas = []
+                self.toggle_subsets = []
+                self.probe_candidates = []
+                self.probe_candidate_idx = 0
+                self.clean_baseline_frame = None
+                self.phase = None
+                self.game_mode = "UNKNOWN"
+                self.obstacle_map = {}
+                self.avatar_pos = None
+                self.goal_pos = None
                 self.gfk_A = None
                 self.gfk_b = None
                 self.gfk_solution = None
@@ -1985,8 +2079,20 @@ class MyAgent(Agent):
                 self.last_levels_completed = obs_lc
                 self.initialized = True
 
+            actions = getattr(latest_frame, "available_actions", [])
+            if not actions and hasattr(self, 'arc_env') and self.arc_env is not None:
+                game_obj = getattr(self.arc_env, '_game', None)
+                if game_obj is not None:
+                    actions = getattr(game_obj, '_available_actions', [])
+            if not actions:
+                actions = [1, 2, 3, 4, 6]
+            act_vals = [getattr(a, 'value', a) for a in actions]
+            has_dir = any(v in [1, 2, 3, 4] for v in act_vals)
+            has_click = (6 in act_vals)
+            has_cycle = (5 in act_vals)
+
             # ── UIP AVATAR & CLOSED-LOOP VERIFICATION (FIX 3) ────────────────
-            if self.uip_frame_before is not None:
+            if has_dir and self.uip_frame_before is not None:
                 detected = self.uip_localize_avatar(self.uip_frame_before, current_frame)
                 if detected is not None:
                     if self.avatar_pos is not None and self.prev_action in (
@@ -2063,7 +2169,7 @@ class MyAgent(Agent):
                         print(f"[CARD_MEMORY] {self.last_card_clicked} -> color {dom_col} (total={len(self.card_memory)})")
 
             # ── CONCRETE GOAL & SOKOBAN DETECTION ─────────────────────────
-            if self.goal_pos is None:
+            if has_dir and self.goal_pos is None:
                 self.goal_pos = self.detect_goal_position(current_frame)
                 if self.goal_pos is not None:
                     step = self.step_size or 3
@@ -2071,7 +2177,7 @@ class MyAgent(Agent):
                     for dr in range(-step, step + 1):
                         for dc in range(-step, step + 1):
                             self.obstacle_map.pop((gr + dr, gc + dc), None)
-            if len(self.obstacle_map) > 0 and (not hasattr(self, 'detected_box_positions') or not self.detected_box_positions):
+            if has_dir and len(self.obstacle_map) > 0 and (not hasattr(self, 'detected_box_positions') or not self.detected_box_positions):
                 self.detect_boxes_and_goals(current_frame)
 
             # ── BISIMULATION QUOTIENT STATE COMPRESSION ───────────────────
@@ -2086,6 +2192,10 @@ class MyAgent(Agent):
 
             bg = get_background_color(f)
             actions = getattr(latest_frame, "available_actions", [])
+            if not actions and hasattr(self, 'arc_env') and self.arc_env is not None:
+                game_obj = getattr(self.arc_env, '_game', None)
+                if game_obj is not None:
+                    actions = getattr(game_obj, '_available_actions', [])
             if not actions:
                 actions = [1, 2, 3, 4, 6]
 
@@ -2134,11 +2244,13 @@ class MyAgent(Agent):
                         self.responsive_buttons.sort(key=lambda p: (p[1], p[0]))
                         self.toggle_subsets = []
                         
-                        # 1. Compute exact GF(k) solution over finite fields
                         if self.toggle_deltas and len(self.toggle_deltas) == len(self.responsive_buttons):
                             A = np.column_stack(self.toggle_deltas)
+                            bg_clean = get_background_color(self.clean_baseline_frame)
+                            b_diff = (self.clean_baseline_frame.flatten() != bg_clean).astype(int)
                             for k in [2, 3, 4]:
                                 b_targets = [
+                                    b_diff % k,
                                     (self.clean_baseline_frame.flatten().astype(int) % k),
                                     np.ones(A.shape[0], dtype=int) % k,
                                     (np.sum(A, axis=1) % k)
@@ -2151,7 +2263,7 @@ class MyAgent(Agent):
                                             if count > 0:
                                                 gfk_combo.extend([self.responsive_buttons[bi]] * int(count))
                                         if gfk_combo and gfk_combo not in self.toggle_subsets:
-                                            self.toggle_subsets.append(gfk_combo)
+                                            self.toggle_subsets.insert(0, gfk_combo)
                         
                         # 2. Add standard combinatorial subsets (fallback, max 120 combos)
                         for k in range(1, min(6, len(self.responsive_buttons) + 1)):
@@ -2419,7 +2531,7 @@ class MyAgent(Agent):
             # ==================================================================
             # HYBRID A* SOKOBAN & BFS NAVIGATION PLANNER (LAYER 5)
             # ==================================================================
-            if not self.action_queue and self.avatar_pos is not None and self.game_mode in ("NAV", "UNKNOWN", "SOKOBAN"):
+            if has_dir and not self.action_queue and self.avatar_pos is not None and self.game_mode in ("NAV", "UNKNOWN", "SOKOBAN"):
                 if self.goal_pos is None:
                     self.goal_pos = self.detect_goal_position(f)
                 if not hasattr(self, 'detected_box_positions') or not self.detected_box_positions:
@@ -2491,11 +2603,14 @@ class MyAgent(Agent):
                     act, data = self.action_queue.pop(0)
                     return self._return_action(act, data, f)
 
-            # ==================================================================
-            # EXPLORATION FALLBACK
-            # ==================================================================
-            cand = [GameAction.from_id(a) for a in actions if a in [x.value for x in GameAction]]
-            act = random.choice(cand) if cand else GameAction.ACTION1
+            cand = []
+            for a in actions:
+                val = a.value if hasattr(a, 'value') else a
+                try:
+                    cand.append(GameAction.from_id(val))
+                except Exception:
+                    pass
+            act = random.choice(cand) if cand else GameAction.ACTION6
             data = {}
             if act == GameAction.ACTION6:
                 if self.responsive_buttons:
