@@ -1019,6 +1019,62 @@ class MyAgent(Agent):
                         q.append(((nr, nc), path + [(act, {})]))
         return []
 
+    def detect_subgoals(self, f: np.ndarray, bg: int) -> List[Tuple[int, int]]:
+        """
+        Extract interactive token waypoints (keys, switches, gems) that must be visited
+        before reaching the final goal (e.g. in ls20, tr87, wa30, sp80, su15 Level 1+).
+        """
+        comps = get_components(f, bg, max_area=50)
+        subgoals = []
+        step = self.step_size or 3
+        
+        for c in comps:
+            cy, cx = int(c['cy']), int(c['cx'])
+            # Skip avatar and final goal
+            if self.avatar_pos is not None:
+                if abs(cy - self.avatar_pos[0]) <= step and abs(cx - self.avatar_pos[1]) <= step:
+                    continue
+            if self.goal_pos is not None:
+                if abs(cy - self.goal_pos[0]) <= step and abs(cx - self.goal_pos[1]) <= step:
+                    continue
+            # Non-wall interactive tokens have small area (between 1 and 25 pixels)
+            if 1 <= c['area'] <= 25 and 2 <= cx <= 61 and 2 <= cy <= 61:
+                subgoals.append((cy, cx))
+        return subgoals
+
+    def subgoal_chained_nav_plan(self,
+                                 avatar_pos: Tuple[int, int],
+                                 goal_pos: Tuple[int, int],
+                                 subgoals: List[Tuple[int, int]]) -> List[Tuple[GameAction, dict]]:
+        """
+        Plan sequential geodesic path visiting all subgoals (keys/switches) in nearest-neighbor order
+        before navigating to the exit goal.
+        """
+        if not subgoals:
+            return self.bfs_nav_plan(avatar_pos, goal_pos)
+
+        full_plan: List[Tuple[GameAction, dict]] = []
+        curr = avatar_pos
+        remaining = list(subgoals)
+
+        while remaining:
+            nearest_idx = min(range(len(remaining)), key=lambda i: abs(curr[0] - remaining[i][0]) + abs(curr[1] - remaining[i][1]))
+            target = remaining.pop(nearest_idx)
+            seg_plan = self.bfs_nav_plan(curr, target)
+            if seg_plan:
+                full_plan.extend(seg_plan)
+                curr = target
+            else:
+                continue
+
+        final_seg = self.bfs_nav_plan(curr, goal_pos)
+        if final_seg:
+            full_plan.extend(final_seg)
+        elif not full_plan:
+            return self.bfs_nav_plan(avatar_pos, goal_pos)
+
+        return full_plan
+
     @property
     def name(self) -> str:
         return f"pipelineiq_v23.{self.MAX_ACTIONS}"
@@ -1056,8 +1112,11 @@ class MyAgent(Agent):
         return GameAction.ACTION1
 
     def _return_action(self, act: GameAction, data: dict, f: np.ndarray) -> GameAction:
-        if act == GameAction.ACTION6 and data and "x" in data:
-            act.set_data(data)
+        if act == GameAction.ACTION6:
+            if not data or "x" not in data or "y" not in data:
+                data = {"x": 32, "y": 32}
+            if hasattr(act, 'set_data'):
+                act.set_data(data)
         self.action_history.append((act, dict(data) if data else {}))
         self.action_history_for_bisim.append(act)
         self.actions_since_level_up += 1
@@ -1211,11 +1270,27 @@ class MyAgent(Agent):
                 self.action_queue = self._build_slider_5act_plan(f, bg)
             return
 
+        # 2. Card Match grid (tn36, vc33, sk48, sc25)
+        cards = [c for c in comps if 4 <= c['area'] <= 36 and abs(c['w'] - c['h']) <= 2 and 4 <= c['cx'] <= 60 and 4 <= c['cy'] <= 60]
+        if has_click and len(cards) >= 6:
+            self.game_mode = "CARD_MATCH"
+            self.phase = "EXECUTE"
+            self.unrevealed_cards = [(c['cx'], c['cy']) for c in cards]
+            self.card_memory = {}
+            self.last_card_clicked = None
+            if self.unrevealed_cards:
+                c0 = self.unrevealed_cards[0]
+                self.last_card_clicked = c0
+                self.action_queue = [(GameAction.ACTION6, {"x": int(c0[0]), "y": int(c0[1])})]
+            return
+
         if has_click and not has_dir and len(comps) <= 25:
             self.game_mode = "CLICK"
             self.phase = "PROBE"
             self.probe_positions = [(c['cx'], c['cy']) for c in perimeter_valves] if perimeter_valves else [(c['cx'], c['cy']) for c in comps]
             self.probe_idx = 0
+            self.unrevealed_cards = [(c['cx'], c['cy']) for c in comps if 4 <= c['area'] <= 120]
+            self.card_memory = {}
             self.action_queue = [
                 (GameAction.ACTION6, {"x": int(self.probe_positions[0][0]), "y": int(self.probe_positions[0][1])})
             ]
@@ -2091,6 +2166,14 @@ class MyAgent(Agent):
             has_click = (6 in act_vals)
             has_cycle = (5 in act_vals)
 
+            # ── CARD REVEAL PATCH OBSERVER (tn36, vc33, sk48, sc25) ────────
+            if self.prev_action == GameAction.ACTION6 and self.prev_frame is not None and getattr(self, 'last_card_clicked', None) is not None:
+                cx, cy = self.last_card_clicked
+                patch = current_frame[max(0, cy-2):min(64, cy+3), max(0, cx-2):min(64, cx+3)]
+                sym_hash = hash(patch.tobytes())
+                self.card_memory[(cx, cy)] = sym_hash
+                self.last_card_clicked = None
+
             # ── UIP AVATAR & CLOSED-LOOP VERIFICATION (FIX 3) ────────────────
             if has_dir and self.uip_frame_before is not None:
                 detected = self.uip_localize_avatar(self.uip_frame_before, current_frame)
@@ -2500,28 +2583,30 @@ class MyAgent(Agent):
             # ==================================================================
             # CARD MATCH PAIRWISE PLANNER (FIX 2: sc25, sk48, tn36, vc33)
             # ==================================================================
-            if has_click and not has_dir and not self.action_queue and self.game_mode in ("CLICK", "UNKNOWN"):
+            if has_click and not self.action_queue and self.game_mode in ("CARD_MATCH", "CLICK", "UNKNOWN"):
                 if self.is_win(latest_frame):
                     return self._handle_win(latest_frame)
 
                 col_map: Dict[int, Tuple[int, int]] = {}
                 match_pair = None
-                for coord, col in list(self.card_memory.items()):
-                    if col in col_map:
-                        match_pair = (col_map[col], coord)
+                for coord, sym in list(self.card_memory.items()):
+                    if sym in col_map:
+                        match_pair = (col_map[sym], coord)
                         break
-                    col_map[col] = coord
+                    col_map[sym] = coord
 
                 if match_pair is not None:
                     c1, c2 = match_pair
-                    print(f"[CARD_MATCH] Found pair for color {self.card_memory[c1]}: {c1} & {c2}")
                     del self.card_memory[c1]
                     del self.card_memory[c2]
+                    if hasattr(self, 'unrevealed_cards'):
+                        if c1 in self.unrevealed_cards: self.unrevealed_cards.remove(c1)
+                        if c2 in self.unrevealed_cards: self.unrevealed_cards.remove(c2)
                     self.action_queue = [
                         (GameAction.ACTION6, {"x": int(c1[0]), "y": int(c1[1])}),
                         (GameAction.ACTION6, {"x": int(c2[0]), "y": int(c2[1])})
                     ]
-                elif self.unrevealed_cards:
+                elif hasattr(self, 'unrevealed_cards') and self.unrevealed_cards:
                     avail = [c for c in self.unrevealed_cards if c not in self.card_memory]
                     if avail:
                         next_c = avail[0]
@@ -2545,11 +2630,12 @@ class MyAgent(Agent):
                     if astar_plan:
                         self.action_queue = astar_plan
 
-                # 2. BFS NAVIGATION (if goal_pos known, no boxes, and obstacle_map populated)
-                if not self.action_queue and self.goal_pos is not None and not self.detected_box_positions and self.step_size is not None and len(self.obstacle_map) > 0:
-                    bfs_plan = self.bfs_nav_plan(self.avatar_pos, self.goal_pos)
-                    if bfs_plan:
-                        self.action_queue = bfs_plan
+                # 2. SUBGOAL CHAINED NAVIGATION (if goal_pos known, no boxes, and obstacle_map populated)
+                if not self.action_queue and self.goal_pos is not None and not self.detected_box_positions and self.step_size is not None:
+                    subgoals = self.detect_subgoals(f, bg)
+                    nav_plan = self.subgoal_chained_nav_plan(self.avatar_pos, self.goal_pos, subgoals)
+                    if nav_plan:
+                        self.action_queue = nav_plan
 
                 # 3. CONCRETE MCTS (fallback)
                 if not self.action_queue and (self.goal_pos is not None or (hasattr(self, 'box_goal_positions') and self.box_goal_positions)) and self.step_size is not None and self.mcts_calls < 8:
