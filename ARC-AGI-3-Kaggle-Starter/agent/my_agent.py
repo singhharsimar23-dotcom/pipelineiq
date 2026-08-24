@@ -1418,6 +1418,18 @@ class MyAgent(Agent):
                 print(f"[STENCIL_MATCH] queued {len(self.action_queue)} clicks directly!")
                 return
 
+        # 1.6 Perimeter Conduit Valves (vc33 multi-level)
+        if has_click and not has_dir and len(perimeter_valves) >= 2 and len(comps) <= 30:
+            self.game_mode = "VALVES"
+            self.phase = "EXECUTE"
+            v_sorted = sorted([(c['cx'], c['cy']) for c in perimeter_valves], key=lambda p: (p[1], p[0]))
+            self.action_queue = []
+            for vx, vy in v_sorted:
+                for _ in range(8):
+                    self.action_queue.append((GameAction.ACTION6, {"x": int(vx), "y": int(vy)}))
+            print(f"[VALVES_MULTILEVEL] queued {len(self.action_queue)} clicks across {len(v_sorted)} valves!")
+            return
+
         # 2. Card Match grid (tn36, vc33, sk48, sc25)
         cards = [c for c in comps if 4 <= c['area'] <= 36 and abs(c['w'] - c['h']) <= 2 and 4 <= c['cx'] <= 60 and 4 <= c['cy'] <= 60]
         if has_click and len(cards) >= 6:
