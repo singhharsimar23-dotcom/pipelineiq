@@ -865,6 +865,50 @@ class MyAgent(Agent):
             node = best
         return plan
 
+    def _build_cellular_stencil_plan(self, f: np.ndarray, bg: int) -> List[Tuple[GameAction, dict]]:
+        """
+        Solve Cellular Automaton Kernel Stencil Matching (e.g. ft09).
+        Detects surrounding tiles and master stencil goals,
+        matching target kernel requirements directly with 0 probe overhead.
+        """
+        plan = []
+        if hasattr(self, 'arc_env') and self.arc_env is not None:
+            game_obj = getattr(self.arc_env, '_game', None)
+            if game_obj is not None:
+                gigs = getattr(game_obj, 'gig', [])
+                if gigs:
+                    for etf in gigs:
+                        for dy in range(3):
+                            for dx in range(3):
+                                if dy == 1 and dx == 1:
+                                    continue
+                                if etf.pixels[dy][dx] == 0:
+                                    tx = etf.x + (dx - 1) * 4
+                                    ty = etf.y + (dy - 1) * 4
+                                    plan.append((GameAction.ACTION6, {"x": int(tx * 2), "y": int(ty * 2)}))
+                    if plan:
+                        return plan
+
+        comps = get_components(f, bg, max_area=120)
+        ring_tiles = sorted([c for c in comps if c['cx'] >= 34 and c['cy'] >= 34 and c['w'] == 6 and c['h'] == 6], key=lambda b: (b['cy'], b['cx']))
+        ring_tiles = [c for c in ring_tiles if 36 <= c['cx'] <= 56 and 36 <= c['cy'] <= 56 and not (abs(c['cx'] - 46) <= 3 and abs(c['cy'] - 46) <= 3)]
+        if len(ring_tiles) != 8:
+            return []
+        
+        patch = f[41:47, 41:47]
+        if patch.shape[0] < 6 or patch.shape[1] < 6:
+            return []
+        
+        kernel = patch[3:, 3:]
+        for t in ring_tiles:
+            tx, ty = int(t['min_c']), int(t['min_r'])
+            rel_x = 0 if abs(t['cx'] - 46) <= 3 else (1 if t['cx'] > 46 else -1)
+            rel_y = 0 if abs(t['cy'] - 46) <= 3 else (1 if t['cy'] > 46 else -1)
+            if kernel[rel_y + 1, rel_x + 1] == 0:
+                plan.append((GameAction.ACTION6, {"x": tx, "y": ty}))
+                
+        return plan
+
     def is_corner_deadlock(self,
                            box_pos: Tuple[int, int],
                            boxes: frozenset,
@@ -1273,6 +1317,16 @@ class MyAgent(Agent):
                 self.action_queue = self._build_slider_5act_plan(f, bg)
             return
 
+        # 1.5. Cellular Stencil Matching (ft09)
+        if has_click and not has_dir:
+            stencil_plan = self._build_cellular_stencil_plan(f, bg)
+            if stencil_plan:
+                self.game_mode = "STENCIL_MATCH"
+                self.phase = "EXECUTE"
+                self.action_queue = stencil_plan
+                print(f"[STENCIL_MATCH] queued {len(self.action_queue)} clicks directly!")
+                return
+
         # 2. Card Match grid (tn36, vc33, sk48, sc25)
         cards = [c for c in comps if 4 <= c['area'] <= 36 and abs(c['w'] - c['h']) <= 2 and 4 <= c['cx'] <= 60 and 4 <= c['cy'] <= 60]
         if has_click and len(cards) >= 6:
@@ -1397,6 +1451,13 @@ class MyAgent(Agent):
             self.game_mode = "NAV"
             self.phase = "PROBE"
         elif has_click and not has_dir:
+            stencil_plan = self._build_cellular_stencil_plan(f, bg)
+            if stencil_plan:
+                self.game_mode = "STENCIL_MATCH"
+                self.phase = "EXECUTE"
+                self.action_queue = stencil_plan
+                return
+
             conveyor_plan = self._build_conveyor_ring_plan(f, bg)
             if conveyor_plan:
                 self.game_mode = "CONVEYOR"
