@@ -1058,6 +1058,60 @@ class MyAgent(Agent):
     def _hash(self, f: np.ndarray) -> str:
         return hashlib.sha256(f.tobytes()).hexdigest()[:12]
 
+    def _extract_walls_from_frame(self, frame: np.ndarray) -> None:
+        """
+        Extract static structural walls directly from Step 0 frame.
+        Zero game_id references, zero hardcoded colors.
+        """
+        import scipy.ndimage as ndi
+
+        flat = frame.flatten()
+        if len(flat) == 0:
+            return
+        bg_color = int(np.bincount(flat).argmax())
+
+        step = self.step_size or 5
+
+        # Avatar color: identify via frame region closest to frame center with pixel area between 1 and 8 grid cells
+        avatar_color = None
+        min_dist_to_center = float('inf')
+        non_bg_mask = (frame != bg_color)
+        lbl, num_features = ndi.label(non_bg_mask)
+        if num_features > 0:
+            areas = ndi.sum(non_bg_mask, lbl, index=np.arange(1, num_features + 1))
+            centers = ndi.center_of_mass(non_bg_mask, lbl, index=np.arange(1, num_features + 1))
+            max_avatar_area = max(64, 8 * step * step)
+            for idx, (area, center) in enumerate(zip(areas, centers)):
+                if 1 <= area <= max_avatar_area:
+                    dist = (center[0] - 32) ** 2 + (center[1] - 32) ** 2
+                    if dist < min_dist_to_center:
+                        min_dist_to_center = dist
+                        r_int, c_int = int(round(center[0])), int(round(center[1]))
+                        if 0 <= r_int < 64 and 0 <= c_int < 64:
+                            avatar_color = int(frame[r_int, c_int])
+
+        # Wall candidates = all pixels where frame != bg_color AND frame != avatar_color
+        wall_candidates = (frame != bg_color)
+        if avatar_color is not None and avatar_color != bg_color:
+            wall_candidates &= (frame != avatar_color)
+
+        # Connected component labeling on wall_candidates
+        w_lbl, w_num = ndi.label(wall_candidates)
+        if w_num > 0:
+            w_areas = ndi.sum(wall_candidates, w_lbl, index=np.arange(1, w_num + 1))
+            threshold_area = step * step
+            for idx, area in enumerate(w_areas, start=1):
+                # Component area > (step_size * step_size) -> structural wall
+                if area > threshold_area:
+                    pts = np.argwhere(w_lbl == idx)
+                    for r, c in pts:
+                        grid_r = int(round(r / step) * step)
+                        grid_c = int(round(c / step) * step)
+                        self.obstacle_map[(grid_r, grid_c)] = True
+                        self.obstacle_map[(int(r), int(c))] = True
+
+        print(f"[WALL_EXTRACT] {len(self.obstacle_map)} cells pre-populated from Step 0 frame, bg={bg_color}, avatar_color={avatar_color}")
+
     def _init_level(self, f: np.ndarray, latest_frame: FrameData) -> None:
         """Initialize archetype detectors for fresh level (Level 0, 1, 2+)."""
         self.reset_model()
@@ -1080,18 +1134,24 @@ class MyAgent(Agent):
         bg = get_background_color(f)
         actions = getattr(latest_frame, "available_actions", [])
         if not actions:
-            actions = [1, 2, 3, 4, 6]
+            act_vals = [1, 2, 3, 4, 6]
+        else:
+            act_vals = [getattr(a, 'value', a) for a in actions]
+
+        has_dir = any(v in [1, 2, 3, 4] for v in act_vals)
+        has_click = (6 in act_vals)
+        has_cycle = (5 in act_vals)
 
         comps = get_components(f, bg, max_area=600)
         button_cluster = [c for c in comps if 16 <= c['area'] <= 64 and abs(c['w'] - c['h']) <= 2]
-        has_click = (6 in actions)
-        has_dir = any(a in actions for a in [1, 2, 3, 4])
-        has_cycle = (5 in actions)
 
         # Edge slider handles (e.g. lp85 has left tab cx<=5 and right tab cx>=58 in middle rows)
         left_sliders = [c for c in comps if c['cx'] <= 5 and 15 <= c['cy'] <= 48 and 20 <= c['area'] <= 120]
         right_sliders = [c for c in comps if c['cx'] >= 58 and 15 <= c['cy'] <= 48 and 20 <= c['area'] <= 120]
         has_edge_sliders = (len(left_sliders) >= 1 and len(right_sliders) >= 1)
+
+        if has_dir and not has_edge_sliders:
+            self._extract_walls_from_frame(f)
 
         if has_click and not has_dir and len(button_cluster) >= 6 and not has_edge_sliders:
             self.game_mode = "TOGGLE_CLUSTER"
@@ -1308,7 +1368,7 @@ class MyAgent(Agent):
                     if (curr_g, curr_go) == target_state:
                         found_plan = path
                         break
-                    if len(path) >= 50:
+                    if len(path) >= 120:
                         continue
                     for btn_name, trans in transitions.items():
                         new_g = tuple(sorted([trans.get(g, g) for g in curr_g]))
@@ -2229,7 +2289,7 @@ class MyAgent(Agent):
             # ==================================================================
             # HYBRID A* SOKOBAN & BFS NAVIGATION PLANNER (LAYER 5)
             # ==================================================================
-            if not self.action_queue and self.avatar_pos is not None:
+            if not self.action_queue and self.avatar_pos is not None and self.game_mode in ("NAV", "UNKNOWN", "SOKOBAN"):
                 if self.goal_pos is None:
                     self.goal_pos = self.detect_goal_position(f)
                 if not hasattr(self, 'detected_box_positions') or not self.detected_box_positions:
