@@ -400,6 +400,9 @@ class IPSProbeOptimizer:
         best = max(self.world_model_hypotheses, key=lambda h: h['prob'])
         return best['step_size']
 
+    def confidence(self) -> float:
+        return float(max(h['prob'] for h in self.world_model_hypotheses))
+
 
 _GLOBAL_D4_CACHE = D4SymmetryCache()
 
@@ -1097,6 +1100,7 @@ class MyAgent(Agent):
                         r_int, c_int = int(round(center[0])), int(round(center[1]))
                         if 0 <= r_int < 64 and 0 <= c_int < 64:
                             avatar_color = int(frame[r_int, c_int])
+                            self.avatar_pos = (r_int, c_int)
 
         # Wall candidates = all pixels where frame != bg_color AND frame != avatar_color
         wall_candidates = (frame != bg_color)
@@ -1117,6 +1121,12 @@ class MyAgent(Agent):
                         grid_c = int(round(c / step) * step)
                         self.obstacle_map[(grid_r, grid_c)] = True
                         self.obstacle_map[(int(r), int(c))] = True
+
+        if self.goal_pos is not None:
+            gr, gc = self.goal_pos
+            for dr in range(-step, step + 1):
+                for dc in range(-step, step + 1):
+                    self.obstacle_map.pop((gr + dr, gc + dc), None)
 
         print(f"[WALL_EXTRACT] {len(self.obstacle_map)} cells pre-populated from Step 0 frame, bg={bg_color}, avatar_color={avatar_color}")
 
@@ -1884,9 +1894,8 @@ class MyAgent(Agent):
                 if (nr, nc) not in visited and \
                    (nr, nc) not in self.obstacle_map and \
                    0 <= nr < 64 and 0 <= nc < 64:
-                    if (f[nr, nc] == floor_col) or (abs(nr - goal[0]) <= 2 and abs(nc - goal[1]) <= 2):
-                        visited.add((nr, nc))
-                        queue.append(((nr, nc), path + [action]))
+                    visited.add((nr, nc))
+                    queue.append(((nr, nc), path + [action]))
         return []
 
     def _build_nav_plan(self, f: np.ndarray, bg: int) -> List[Tuple[GameAction, dict]]:
@@ -1961,9 +1970,7 @@ class MyAgent(Agent):
                     )
                 self.actions_since_level_up = 0
                 self.uip_frame_before = None
-                self.avatar_pos = None
-                self.obstacle_map = {}
-                # self.step_size is preserved across levels (invariant)
+                self.step_size = None
                 self.button_positions = []
                 self.gfk_A = None
                 self.gfk_b = None
@@ -1972,7 +1979,7 @@ class MyAgent(Agent):
                 self.d4_plan = []
                 self.action_history = []
                 self.level_initial_frame = current_frame.copy()
-                print(f"[LEVEL_UP] lc={obs_lc} preserved_step_size={self.step_size}")
+                print(f"[LEVEL_UP] lc={obs_lc} reset_step_size")
                 self.uip_frame_before = current_frame.copy()
                 self._init_level(current_frame, latest_frame)
                 self.last_levels_completed = obs_lc
@@ -1998,9 +2005,11 @@ class MyAgent(Agent):
                             delta_disp = abs(detected[0] - self.avatar_pos[0]) + abs(detected[1] - self.avatar_pos[1])
                             if delta_disp > 0:
                                 self.ips.update(self.avatar_pos, detected, self.prev_action)
-                                if self.step_size is None:
-                                    self.step_size = self.ips.best_step_size()
-                                    print(f"[STEP_SIZE] detected={self.step_size} via IPS")
+                                if self.step_size is None or self.ips.confidence() > 0.85:
+                                    new_sz = self.ips.best_step_size()
+                                    if new_sz != self.step_size:
+                                        self.step_size = new_sz
+                                        print(f"[STEP_SIZE] updated={self.step_size} via IPS (conf={self.ips.confidence():.3f})")
                             print(f"[ORACLE] clear at {attempted}")
                         else:
                             self.obstacle_map[attempted] = True
@@ -2056,6 +2065,12 @@ class MyAgent(Agent):
             # ── CONCRETE GOAL & SOKOBAN DETECTION ─────────────────────────
             if self.goal_pos is None:
                 self.goal_pos = self.detect_goal_position(current_frame)
+                if self.goal_pos is not None:
+                    step = self.step_size or 3
+                    gr, gc = self.goal_pos
+                    for dr in range(-step, step + 1):
+                        for dc in range(-step, step + 1):
+                            self.obstacle_map.pop((gr + dr, gc + dc), None)
             if len(self.obstacle_map) > 0 and (not hasattr(self, 'detected_box_positions') or not self.detected_box_positions):
                 self.detect_boxes_and_goals(current_frame)
 
@@ -2176,6 +2191,61 @@ class MyAgent(Agent):
                     if self._slider_rebuild_count < 3:
                         self._slider_rebuild_count += 1
                         self.action_queue = self._build_slider_5act_plan(f, bg)
+
+            # ==================================================================
+            # LIVESTOCK HERDING CONTINUOUS MULTI-ENTITY EXECUTION (WA30)
+            # ==================================================================
+            if self.game_mode == "HERDING":
+                if self.is_win(latest_frame):
+                    return self._handle_win(latest_frame)
+                if not self.action_queue:
+                    herding_plan = self._build_herding_dog_plan(f, bg)
+                    if herding_plan:
+                        self.action_queue = herding_plan
+
+            # ==================================================================
+            # CONVEYOR CONTINUOUS MULTI-LEVEL EXECUTION (LP85)
+            # ==================================================================
+            if self.game_mode == "CONVEYOR":
+                if self.is_win(latest_frame):
+                    return self._handle_win(latest_frame)
+                if not self.action_queue:
+                    conveyor_plan = self._build_conveyor_ring_plan(f, bg)
+                    if conveyor_plan:
+                        self.action_queue = conveyor_plan
+
+            # ==================================================================
+            # TIME-REWIND CLONE SHADOW CONTINUOUS EXECUTION (G50T)
+            # ==================================================================
+            if self.game_mode == "CLONE_SHADOW":
+                if self.is_win(latest_frame):
+                    return self._handle_win(latest_frame)
+                if not self.action_queue:
+                    clone_plan = self._build_clone_shadow_plan(f, bg)
+                    if clone_plan:
+                        self.action_queue = clone_plan
+
+            # ==================================================================
+            # CIRCUIT & ROTATION CONTINUOUS EXECUTION
+            # ==================================================================
+            if self.game_mode == "CIRCUIT":
+                if self.is_win(latest_frame):
+                    return self._handle_win(latest_frame)
+                if not self.action_queue:
+                    circuit_plan = self._build_circuit_plan(f, bg)
+                    if circuit_plan:
+                        self.action_queue = circuit_plan
+
+            # ==================================================================
+            # PEG SOLITAIRE CONTINUOUS EXECUTION
+            # ==================================================================
+            if self.game_mode == "PEG_SOLITAIRE":
+                if self.is_win(latest_frame):
+                    return self._handle_win(latest_frame)
+                if not self.action_queue:
+                    peg_plan = self._build_peg_solitaire_plan(f, bg)
+                    if peg_plan:
+                        self.action_queue = peg_plan
 
             # ==================================================================
             # NAV PROBE & CONTINUOUS CLOSED-LOOP BFS EXECUTION
