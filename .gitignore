@@ -1,0 +1,14 @@
+.env
+.env.*
+__pycache__/
+*.pyc
+.pytest_cache/
+environment_files/
+kaggle_download/
+ARCHIVE_KEEP/
+ARCHIVE_OLD_RUNS/
+CLEAN_START_KEEP/
+KEEP/
+.scorecards/
+.kaggle/
+*.log

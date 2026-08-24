@@ -1,0 +1,5 @@
+arc-agi
+supabase
+google-generativeai
+python-dotenv
+uuid

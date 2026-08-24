@@ -1,0 +1,21 @@
+"""
+Inspect avatar object world.wpwvsglgmb in lf52.
+"""
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "ARC-AGI-3-Kaggle-Starter"))
+sys.path.insert(0, str(ROOT / "ARC-AGI-3-Kaggle-Starter" / "vendor" / "ARC-AGI-3-Agents"))
+
+from arc_agi import Arcade, OperationMode
+
+arcade = Arcade(operation_mode=OperationMode.OFFLINE)
+env = arcade.make("lf52", seed=0)
+obs = env.reset()
+game = env._game
+world = game.ikhhdzfmarl
+
+avatar = world.wpwvsglgmb
+print(f"Avatar: name={getattr(avatar, 'name', None)}, pos=({avatar.x}, {avatar.y})")
