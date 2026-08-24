@@ -1037,8 +1037,11 @@ class MyAgent(Agent):
             if self.goal_pos is not None:
                 if abs(cy - self.goal_pos[0]) <= step and abs(cx - self.goal_pos[1]) <= step:
                     continue
-            # Non-wall interactive tokens have small area (between 1 and 25 pixels)
-            if 1 <= c['area'] <= 25 and 2 <= cx <= 61 and 2 <= cy <= 61:
+            # Skip if cell is classified as wall
+            if (cy, cx) in self.obstacle_map:
+                continue
+            # Non-wall interactive tokens: compact geometry inside arena
+            if 4 <= c['area'] <= 36 and abs(c['w'] - c['h']) <= 1 and 6 <= cx <= 58 and 6 <= cy <= 58:
                 subgoals.append((cy, cx))
         return subgoals
 
@@ -2171,7 +2174,21 @@ class MyAgent(Agent):
                 cx, cy = self.last_card_clicked
                 patch = current_frame[max(0, cy-2):min(64, cy+3), max(0, cx-2):min(64, cx+3)]
                 sym_hash = hash(patch.tobytes())
-                self.card_memory[(cx, cy)] = sym_hash
+                
+                matched_prev = None
+                for prev_c, prev_sym in list(self.card_memory.items()):
+                    if prev_c != (cx, cy) and prev_sym == sym_hash:
+                        matched_prev = prev_c
+                        break
+                        
+                if matched_prev is not None:
+                    del self.card_memory[matched_prev]
+                    if hasattr(self, 'unrevealed_cards'):
+                        if (cx, cy) in self.unrevealed_cards: self.unrevealed_cards.remove((cx, cy))
+                        if matched_prev in self.unrevealed_cards: self.unrevealed_cards.remove(matched_prev)
+                    self.action_queue = [(GameAction.ACTION6, {"x": int(matched_prev[0]), "y": int(matched_prev[1])})]
+                else:
+                    self.card_memory[(cx, cy)] = sym_hash
                 self.last_card_clicked = None
 
             # ── UIP AVATAR & CLOSED-LOOP VERIFICATION (FIX 3) ────────────────
@@ -2233,9 +2250,18 @@ class MyAgent(Agent):
                     elif self.prev_action == GameAction.ACTION4: dc = step
                     attempted = (self.avatar_pos[0] + dr, self.avatar_pos[1] + dc)
                     self.obstacle_map[attempted] = True
-                    print(f"[ORACLE] blocked at {attempted}")
-                    if self.game_mode == "NAV" and self.goal_pos is not None and not self.detected_box_positions:
-                        self.action_queue.clear()
+
+            # ── DYNAMIC KEY-DOOR DISSOLUTION & OBSTACLE MAP REFRESH ─────────
+            if has_dir and self.uip_frame_before is not None and self.avatar_pos is not None:
+                ar, ac = self.avatar_pos
+                diff_mask = (current_frame != self.uip_frame_before)
+                diff_mask[max(0, ar - 4):min(64, ar + 5), max(0, ac - 4):min(64, ac + 5)] = False
+                env_diff_count = int(np.sum(diff_mask))
+                if env_diff_count >= 25:
+                    bg_col = get_background_color(current_frame)
+                    to_remove = [pt for pt in list(self.obstacle_map.keys()) if 0 <= pt[0] < 64 and 0 <= pt[1] < 64 and current_frame[pt[0], pt[1]] == bg_col]
+                    for pt in to_remove:
+                        del self.obstacle_map[pt]
             self.uip_frame_before = current_frame.copy()
 
             # ── CARD REVEAL OBSERVER (FIX 2) ─────────────────────────────────
