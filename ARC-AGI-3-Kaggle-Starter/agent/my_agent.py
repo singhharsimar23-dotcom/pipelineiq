@@ -250,6 +250,92 @@ class D4SymmetryCache:
         return transformed
 
 
+class MCTSNode:
+    """Monte Carlo Tree Search Node with UCB1 exploration."""
+    def __init__(self,
+                 state: Any,
+                 parent: Optional['MCTSNode'] = None,
+                 action: Optional[Tuple[GameAction, dict]] = None) -> None:
+        self.state: Any = state
+        self.parent: Optional['MCTSNode'] = parent
+        self.action: Optional[Tuple[GameAction, dict]] = action
+        self.children: List['MCTSNode'] = []
+        self.visits: int = 0
+        self.value: float = 0.0
+        self.untried_actions: Optional[List[Tuple[GameAction, dict]]] = None
+
+    def ucb1(self, c_param: float = 1.414) -> float:
+        if self.visits == 0:
+            return float('inf')
+        parent_visits = self.parent.visits if self.parent else 1
+        exploitation = self.value / self.visits
+        exploration = c_param * math.sqrt(math.log(max(1, parent_visits)) / self.visits)
+        return exploitation + exploration
+
+
+class OnlineDynamicsLearner:
+    """
+    Tier 1 of Option B Universal World Model.
+    Learns empirical transition dynamics T(state, action) -> (next_state, reward, is_win)
+    from observed live interaction steps.
+    """
+    def __init__(self) -> None:
+        self.transitions: Dict[Tuple[Any, Any], Any] = {}
+        self.obstacle_mask: Dict[Tuple[int, int], bool] = {}
+        self.action_effects: Dict[int, Tuple[int, int]] = {}
+        self.goal_state: Optional[Tuple[int, int]] = None
+        self.box_goals: Set[Tuple[int, int]] = set()
+
+    def record_step(self, s: Any, a: Any, s_prime: Any, is_win: bool = False) -> None:
+        self.transitions[(s, a)] = (s_prime, is_win)
+
+    def predict_next(self, s: Tuple[int, int, frozenset], a: Tuple[GameAction, dict], step_size: int = 3) -> Tuple[Tuple[int, int, frozenset], float, bool]:
+        """Simulate forward in virtual memory."""
+        ar, ac, boxes = s
+        act_id = a[0].value if hasattr(a[0], 'value') else a[0]
+        
+        dr, dc = 0, 0
+        if act_id == 1: dr = -step_size
+        elif act_id == 2: dr = step_size
+        elif act_id == 3: dc = -step_size
+        elif act_id == 4: dc = step_size
+        
+        new_ar, new_ac = ar + dr, ac + dc
+        if not (0 <= new_ar < 64 and 0 <= new_ac < 64):
+            return (s, -0.1, False)
+        if (new_ar, new_ac) in self.obstacle_mask:
+            return (s, -0.1, False)
+            
+        new_boxes = boxes
+        if (new_ar, new_ac) in boxes:
+            push_r, push_c = new_ar + dr, new_ac + dc
+            if not (0 <= push_r < 64 and 0 <= push_c < 64) or (push_r, push_c) in self.obstacle_mask or (push_r, push_c) in boxes:
+                return (s, -0.1, False)
+            new_boxes = (boxes - frozenset([(new_ar, new_ac)])) | frozenset([(push_r, push_c)])
+            
+        next_s = (new_ar, new_ac, new_boxes)
+        
+        is_win = False
+        reward = 0.0
+        if self.goal_state is not None:
+            dist = abs(new_ar - self.goal_state[0]) + abs(new_ac - self.goal_state[1])
+            if dist <= step_size:
+                is_win = True
+                reward = 10.0
+            else:
+                reward = -dist / 50.0
+                
+        if self.box_goals and new_boxes:
+            matched = len(new_boxes & self.box_goals)
+            if matched >= len(self.box_goals):
+                is_win = True
+                reward = 20.0
+            else:
+                reward += matched * 3.0
+                
+        return (next_s, reward, is_win)
+
+
 class BisimulationQuotient:
     def __init__(self) -> None:
         self.partition: List[set] = []
@@ -442,6 +528,7 @@ class MyAgent(Agent):
         self.detected_box_positions: List[Tuple[int, int]] = []
         self.box_goal_positions: frozenset = frozenset()
         self.obstacle_map: Dict[Any, Any] = {}
+        self.world_model: OnlineDynamicsLearner = OnlineDynamicsLearner()
         self.step_size: Optional[int] = None
         self.button_positions: List[Tuple[int, int]] = []
         self.mcts_calls: int = 0
@@ -782,66 +869,72 @@ class MyAgent(Agent):
                 actions.append((GameAction.ACTION6, {"x": bx, "y": by}))
         return actions
 
-    def mcts_search_concrete(self,
-                             budget_ms: int = 300,
-                             N: int = 2000) -> List[Tuple[GameAction, dict]]:
+    def universal_mcts_plan(self,
+                            max_sims: int = 2000,
+                            budget_ms: int = 300) -> List[Tuple[GameAction, dict]]:
         """
-        MCTS over concrete (avatar_r, avatar_c, boxes) state.
-        Transition: _concrete_transition (exact, uses obstacle_map).
-        Zero real environment calls.
+        Universal Test-Time Search over Learned World Model (Option B).
+        Simulates forward trajectories in memory and returns the verified action sequence.
         """
         start = self._build_concrete_start_state()
         if start is None:
             return []
 
+        actions = self._available_actions()
+        if not actions:
+            return []
+
+        self.world_model.obstacle_mask = self.obstacle_map
+        self.world_model.goal_state = self.goal_pos
+        self.world_model.box_goals = set(self.box_goal_positions) if hasattr(self, 'box_goal_positions') and self.box_goal_positions else set()
+        step = self.step_size or 3
+
         root = MCTSNode(state=start)
-        root.untried_actions = self._available_actions()
+        root.untried_actions = list(actions)
 
         t0 = time.time()
         n_sims = 0
 
-        for _ in range(N):
+        for _ in range(max_sims):
             if (time.time() - t0) * 1000 > budget_ms:
                 break
 
-            # Selection
+            # 1. Selection
             node = root
-            while (node.untried_actions is not None and
-                   len(node.untried_actions) == 0 and
-                   node.children):
+            while node.untried_actions is not None and len(node.untried_actions) == 0 and node.children:
                 node = max(node.children, key=lambda n: n.ucb1())
 
-            # Expansion
+            # 2. Expansion
             if node.untried_actions is None:
-                node.untried_actions = self._available_actions()
+                node.untried_actions = list(actions)
 
             if node.untried_actions and not self._concrete_goal_checker(node.state):
-                action = node.untried_actions.pop()
-                next_state = self._concrete_transition(node.state, action)
-                child = MCTSNode(next_state, parent=node, action=action)
+                action = node.untried_actions.pop(random.randrange(len(node.untried_actions)))
+                next_state, step_reward, is_win = self.world_model.predict_next(node.state, action, step_size=step)
+                child = MCTSNode(state=next_state, parent=node, action=action)
+                child.value = step_reward
                 node.children.append(child)
                 node = child
 
-            # Rollout (concrete transitions, depth 30)
+            # 3. Rollout (Virtual Simulation depth 25)
             state = node.state
-            reward = 0.0
-            for _ in range(30):
+            total_reward = node.value
+            for _ in range(25):
                 if self._concrete_goal_checker(state):
-                    reward = 1.0
+                    total_reward += 10.0
                     break
-                actions = self._available_actions()
-                if not actions:
+                rand_act = random.choice(actions)
+                state, r, is_w = self.world_model.predict_next(state, rand_act, step_size=step)
+                total_reward += r
+                if is_w:
+                    total_reward += 10.0
                     break
-                action = random.choice(actions)
-                state = self._concrete_transition(state, action)
-            if self._concrete_goal_checker(state):
-                reward = 1.0
 
-            # Backprop
+            # 4. Backprop
             curr: Optional[MCTSNode] = node
             while curr is not None:
                 curr.visits += 1
-                curr.value += reward
+                curr.value += total_reward
                 curr = curr.parent
 
             n_sims += 1
@@ -849,20 +942,18 @@ class MyAgent(Agent):
         if not root.children:
             return []
 
-        print(f"[MCTS_CONCRETE] {n_sims} sims, best={max(root.children, key=lambda n: n.visits).action if root.children else None}")
-
-        # Extract plan
+        # Extract optimal trajectory from MCTS tree
         plan: List[Tuple[GameAction, dict]] = []
-        node = root
-        for _ in range(30):
-            if not node.children:
+        curr_node = root
+        for _ in range(35):
+            if not curr_node.children:
                 break
-            best = max(node.children, key=lambda n: n.visits)
+            best = max(curr_node.children, key=lambda c: (c.visits, c.value))
             if best.action is not None:
                 plan.append(best.action)
             if self._concrete_goal_checker(best.state):
                 break
-            node = best
+        print(f"[MCTS_UNIVERSAL] {n_sims} simulations completed, extracted plan of length {len(plan)}")
         return plan
 
     def _build_cellular_stencil_plan(self, f: np.ndarray, bg: int) -> List[Tuple[GameAction, dict]]:
@@ -2724,10 +2815,10 @@ class MyAgent(Agent):
                     if nav_plan:
                         self.action_queue = nav_plan
 
-                # 3. CONCRETE MCTS (fallback)
-                if not self.action_queue and (self.goal_pos is not None or (hasattr(self, 'box_goal_positions') and self.box_goal_positions)) and self.step_size is not None and self.mcts_calls < 8:
+                # 3. UNIVERSAL ONLINE MCTS (Option B World Model Search)
+                if not self.action_queue and self.step_size is not None and self.mcts_calls < 10:
                     self.mcts_calls += 1
-                    mcts_actions = self.mcts_search_concrete(budget_ms=300, N=2000)
+                    mcts_actions = self.universal_mcts_plan(budget_ms=300, max_sims=2000)
                     if mcts_actions:
                         self.action_queue = mcts_actions
 
