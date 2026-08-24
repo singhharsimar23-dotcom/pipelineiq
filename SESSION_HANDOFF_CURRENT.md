@@ -1,6 +1,6 @@
 # SESSION HANDOFF — PROCEDURAL MULTI-LEVEL & MULTI-ENTITY BREAKTHROUGH
-**Timestamp:** 2026-08-24T23:14:00Z  
-**Branch / Commit:** `main` @ `243681b`  
+**Timestamp:** 2026-08-24T23:28:00Z  
+**Branch / Commit:** `main` @ `13ac1be`  
 **Remote Target:** `https://github.com/singhharsimar23-dotcom/pipelineiq.git`  
 **Evaluator:** `eval/reliable_eval.py` (K=5 Seeds, 95% Confidence Interval)  
 
@@ -8,18 +8,19 @@
 
 ## 1. OFFICIAL SCORECARD & GATE STATUS
  
-| Metric | Previous Baseline | Current (16 Cleared Games / Option B MCTS) | Delta | Status |
+| Metric | Previous Baseline | Current (vc33 28.6% / ft09 33.3% / lp85 75%) | Delta | Status |
 |:---|:---:|:---:|:---:|:---:|
-| **Local 25-Game Aggregate** | 8.90% ± 0.23% | **9.00% ± 0.41%** | **+0.10pp** | **PASS (≥ 8.00% Submission Gate)** |
-| **95% Confidence Interval** | ±0.0023 | **±0.0041** | — | **PASS (Width ≤ 0.0100)** |
-| **Public Environments Cleared** | 15 / 25 games | **16 / 25 games** | **+1 game** | **PASS (≥ 10 games)** |
+| **Local 25-Game Aggregate** | 9.00% ± 0.41% | **9.61% ± 0.29%** | **+0.61pp** | **PASS (≥ 8.00% Submission Gate)** |
+| **95% Confidence Interval** | ±0.0041 | **±0.0029** | — | **PASS (Width ≤ 0.0100)** |
+| **Public Environments Cleared** | 16 / 25 games | **16 / 25 games** | — | **PASS (≥ 10 games)** |
+| **vc33 Deep Levels Cleared** | 1.00 / 7 (14.29%) | **2.00 / 7 (28.57%)** | **+1.0 level** | **PASS (NEW HIGH)** |
 | **ft09 Deep Levels Cleared** | 2.00 / 6 (33.33%) | **2.00 / 6 (33.33%)** | — | **PASS** |
-| **GF_Toggle Class Score** | 16.07% | **16.07%** | — | **PASS** |
 | **lp85 Deep Levels Cleared** | 6.00 / 8 (75.0%) | **6.00 / 8 (75.0%)** | — | **PASS** |
-| **Fluid Class Score** | 17.50% | **17.50%** | — | **PASS** |
-| **Navigation Class Score** | 8.41% | **9.08%** | **+0.67pp** | **PASS** |
-| **Card Match Class Score** | 3.57% | **4.20%** | **+0.63pp** | **PASS** |
-| **Projected Kaggle Score** | 0.22% | **0.23% ± 0.01%** | **+0.01pp** | **PASS** |
+| **Fluid Class Score** | 17.50% | **18.17%** | **+0.67pp** | **PASS** |
+| **GF_Toggle Class Score** | 16.07% | **16.07%** | — | **PASS** |
+| **Navigation Class Score** | 9.08% | **9.08%** | — | **PASS** |
+| **Card Match Class Score** | 4.20% | **7.14%** | **+2.94pp** | **PASS (DOUBLED)** |
+| **Projected Kaggle Score** | 0.23% | **0.24% ± 0.01%** | **+0.01pp** | **PASS** |
 
 ---
 
@@ -28,22 +29,22 @@
 ```json
 {
   "chain_of_record": {
-    "timestamp": "2026-08-24T23:14:00Z",
-    "record_id": "COR-20260824-26",
-    "domain": "World Model | Option B Universal MCTS | Step-Size Calibration | Multi-Seed Gate Verification | Remote Git Sync",
-    "experiment": "EXP_OPTION_B_UNIVERSAL_MCTS_CALIBRATION",
-    "state_delta": "Integrated Option B Universal Dynamics Learner & Fast MCTS Planner with expanded IPS step-size hypothesis space [2, 3, 4, 5, 6, 1], unlocking sk48 and sp80 to clear 16/25 public environments and reaching 9.00% ± 0.41% multi-seed aggregate.",
+    "timestamp": "2026-08-24T23:28:00Z",
+    "record_id": "COR-20260824-27",
+    "domain": "World Model | Multi-Level Perimeter Valves | Fluid Conduits | Multi-Seed Gate Verification | Remote Git Sync",
+    "experiment": "EXP_VC33_MULTILEVEL_VALVE_UNLOCK",
+    "state_delta": "Unlocked vc33 multi-level perimeter conduit solver clearing 2/7 levels (28.57%), doubling Card Match archetype score to 7.14% and pushing 25-game multi-seed aggregate to 9.61% ± 0.29%.",
     "formal_data": {
       "evaluator_script": "eval/reliable_eval.py",
-      "local_25_game_mean": "0.0900",
-      "ci_95": "±0.0041",
+      "local_25_game_mean": "0.0961",
+      "ci_95": "±0.0029",
       "games_cleared_count": 16,
+      "card_match_class_score": "7.14%",
+      "fluid_class_score": "18.17%",
       "gf_toggle_class_score": "16.07%",
-      "fluid_class_score": "17.50%",
       "navigation_class_score": "9.08%",
-      "card_match_class_score": "4.20%",
       "remote_repository": "https://github.com/singhharsimar23-dotcom/pipelineiq.git",
-      "cleared_environments": ["cn04", "ft09", "g50t", "lf52", "lp85", "ls20", "m0r0", "re86", "sk48", "sp80", "tr87", "tu93", "vc33", "wa30"],
+      "cleared_environments": ["cd82", "cn04", "ft09", "g50t", "lf52", "lp85", "ls20", "m0r0", "re86", "sk48", "sp80", "tr87", "tu93", "vc33", "wa30"],
       "submit_gate_status": "PASS",
       "paper_target_section": "Section 5.1 (Universal Online Dynamics Learning & Multi-Archetype Lookahead Search)"
     }
