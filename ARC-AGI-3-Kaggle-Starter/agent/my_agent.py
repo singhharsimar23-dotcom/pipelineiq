@@ -434,8 +434,8 @@ class IPSProbeOptimizer:
         Equal prior probability 0.25 each.
         """
         self.world_model_hypotheses = [
-            {'step_size': s, 'prob': 0.25}
-            for s in [3, 5, 6, 1]
+            {'step_size': s, 'prob': 1.0 / 6.0}
+            for s in [2, 3, 4, 5, 6, 1]
         ]
 
     def select_probe(self) -> Optional[GameAction]:
