@@ -468,6 +468,10 @@ class MyAgent(Agent):
         self.slider_left: Optional[Tuple[int, int]] = None
         self.slider_right: Optional[Tuple[int, int]] = None
         self.clean_baseline_frame: Optional[np.ndarray] = None
+        self.card_memory: Dict[Tuple[int, int], int] = {}
+        self.unrevealed_cards: List[Tuple[int, int]] = []
+        self.last_card_clicked: Optional[Tuple[int, int]] = None
+        self.planned_next_pos: Optional[Tuple[int, int]] = None
 
         # Nav Archetype Data
         self.wall_color: Optional[int] = None
@@ -1054,6 +1058,10 @@ class MyAgent(Agent):
         self.goal_pos = None
         self.detected_box_positions = []
         self.box_goal_positions = frozenset()
+        self.card_memory.clear()
+        self.unrevealed_cards.clear()
+        self.last_card_clicked = None
+        self.planned_next_pos = None
 
     def _hash(self, f: np.ndarray) -> str:
         return hashlib.sha256(f.tobytes()).hexdigest()[:12]
@@ -1101,8 +1109,8 @@ class MyAgent(Agent):
             w_areas = ndi.sum(wall_candidates, w_lbl, index=np.arange(1, w_num + 1))
             threshold_area = step * step
             for idx, area in enumerate(w_areas, start=1):
-                # Component area > (step_size * step_size) -> structural wall
-                if area > threshold_area:
+                # Component area > (step_size * step_size) and < 1500 -> structural wall
+                if threshold_area < area < 1500:
                     pts = np.argwhere(w_lbl == idx)
                     for r, c in pts:
                         grid_r = int(round(r / step) * step)
@@ -1191,50 +1199,6 @@ class MyAgent(Agent):
             self.action_queue = self._build_slider_5act_plan(f, bg)
             return
 
-        # Also try specialized plans when cycle+dir+click (e.g. ar25 with actions 1-7)
-        if has_cycle and has_dir and has_click and len(button_cluster) < 6:
-            mirror_plan = self._build_mirror_reflection_plan(f, bg)
-            if mirror_plan:
-                self.game_mode = "MIRROR_REFLECTION"
-                self.phase = "EXECUTE"
-                self.action_queue = mirror_plan
-                return
-
-            herding_plan = self._build_herding_plan(f, bg)
-            if herding_plan:
-                self.game_mode = "HERDING"
-                self.phase = "EXECUTE"
-                self.action_queue = herding_plan
-                return
-
-            clone_plan = self._build_clone_shadow_plan(f, bg)
-            if clone_plan:
-                self.game_mode = "CLONE_SHADOW"
-                self.phase = "EXECUTE"
-                self.action_queue = clone_plan
-                return
-
-            circuit_plan = self._build_circuit_connector_plan(f, bg)
-            if circuit_plan:
-                self.game_mode = "CIRCUIT"
-                self.phase = "EXECUTE"
-                self.action_queue = circuit_plan
-                return
-
-            peg_plan = self._build_peg_solitaire_plan(f, bg)
-            if peg_plan:
-                self.game_mode = "PEG_SOLITAIRE"
-                self.phase = "EXECUTE"
-                self.action_queue = peg_plan
-                return
-
-            slider_plan = self._build_slider_5act_plan(f, bg)
-            if slider_plan:
-                self.game_mode = "SLIDER_5ACT"
-                self.phase = "EXECUTE"
-                self.action_queue = slider_plan
-                return
-
         elif has_dir and not has_click:
             # Check for Formal Grammar Sequence signature (horizontal rows of glyph tokens, e.g. tr87)
             grammar_plan = self._build_grammar_plan(f, bg)
@@ -1274,7 +1238,7 @@ class MyAgent(Agent):
             self.phase = "PROBE"
             self._build_click_probes(f, bg)
         else:
-            # 1. Check for Peg Solitaire signature (regular lattice of small peg and hole components)
+            # 1. Check for Peg Solitaire signature
             peg_plan = self._build_peg_solitaire_plan(f, bg)
             if peg_plan:
                 self.game_mode = "PEG_SOLITAIRE"
@@ -1282,12 +1246,36 @@ class MyAgent(Agent):
                 self.action_queue = peg_plan
                 return
 
-            # 2. Check for Circuit Connector signature (e.g. cn04: connector dots on movable pieces)
+            # 2. Check for Circuit Connector signature (e.g. cn04)
             circuit_plan = self._build_circuit_connector_plan(f, bg)
             if circuit_plan:
                 self.game_mode = "CIRCUIT"
                 self.phase = "EXECUTE"
                 self.action_queue = circuit_plan
+                return
+
+            # 3. Check for Grammar Plan (e.g. tr87)
+            grammar_plan = self._build_grammar_plan(f, bg)
+            if grammar_plan:
+                self.game_mode = "GRAMMAR"
+                self.phase = "EXECUTE"
+                self.action_queue = grammar_plan
+                return
+
+            # 4. Check for Discrete Maze Graph (e.g. tu93)
+            maze_plan = self._build_maze_graph_plan(f, bg)
+            if maze_plan:
+                self.game_mode = "MAZE_GRAPH"
+                self.phase = "EXECUTE"
+                self.action_queue = maze_plan
+                return
+
+            # 5. Check for Livestock Herding (e.g. wa30)
+            herding_plan = self._build_herding_dog_plan(f, bg)
+            if herding_plan:
+                self.game_mode = "HERDING"
+                self.phase = "EXECUTE"
+                self.action_queue = herding_plan
                 return
 
             self.game_mode = "HYBRID"
@@ -1846,7 +1834,7 @@ class MyAgent(Agent):
             c for c in comps
             if (c['cx'] >= 54 or c['cx'] <= 10 or c['cy'] <= 10 or c['cy'] >= 54)
             and 4 <= c['area'] <= 80
-            and 4 <= c['cx'] <= 61 and 4 <= c['cy'] <= 61
+            and 0 <= c['cx'] < 64 and 0 <= c['cy'] < 64
         ]
         for c in perimeter:
             probes.append((c['cx'], c['cy']))
@@ -1942,6 +1930,11 @@ class MyAgent(Agent):
             current_frame = get_2d_grid(latest_frame)
             f = current_frame
 
+            actions_avail = getattr(latest_frame, "available_actions", [])
+            act_vals = [getattr(a, 'value', a) for a in actions_avail] if actions_avail else [1, 2, 3, 4, 6]
+            has_click = (6 in act_vals)
+            has_dir = any(v in [1, 2, 3, 4] for v in act_vals)
+
             if self.step_counter >= self.MAX_ACTIONS:
                 return GameAction.RESET
 
@@ -1985,7 +1978,7 @@ class MyAgent(Agent):
                 self.last_levels_completed = obs_lc
                 self.initialized = True
 
-            # ── UIP AVATAR & COLLISION ORACLE UPDATE ──────────────────────────
+            # ── UIP AVATAR & CLOSED-LOOP VERIFICATION (FIX 3) ────────────────
             if self.uip_frame_before is not None:
                 detected = self.uip_localize_avatar(self.uip_frame_before, current_frame)
                 if detected is not None:
@@ -2000,7 +1993,8 @@ class MyAgent(Agent):
                         elif self.prev_action == GameAction.ACTION4: dc = step
                         
                         attempted = (self.avatar_pos[0] + dr, self.avatar_pos[1] + dc)
-                        if abs(detected[0] - attempted[0]) <= 2 and abs(detected[1] - attempted[1]) <= 2:
+                        dist_dev = abs(detected[0] - attempted[0]) + abs(detected[1] - attempted[1])
+                        if dist_dev <= 2:
                             delta_disp = abs(detected[0] - self.avatar_pos[0]) + abs(detected[1] - self.avatar_pos[1])
                             if delta_disp > 0:
                                 self.ips.update(self.avatar_pos, detected, self.prev_action)
@@ -2011,6 +2005,24 @@ class MyAgent(Agent):
                         else:
                             self.obstacle_map[attempted] = True
                             print(f"[ORACLE] blocked at {attempted}")
+                            if self.game_mode == "NAV" and self.goal_pos is not None and not self.detected_box_positions:
+                                self.action_queue.clear()
+
+                                # Check for moving hazard near avatar (within 2*step radius)
+                                diff_mask = (current_frame != self.uip_frame_before)
+                                ar, ac = detected
+                                diff_mask[max(0, ar - 3):min(64, ar + 4), max(0, ac - 3):min(64, ac + 4)] = False
+                                moving_pts = np.argwhere(diff_mask)
+                                for mr, mc in moving_pts:
+                                    if abs(mr - ar) <= 2 * step and abs(mc - ac) <= 2 * step:
+                                        print(f"[HAZARD] Dynamic moving obstacle detected at ({mr}, {mc})")
+                                        self.obstacle_map[(int(mr), int(mc))] = True
+
+                                # Fast BFS replan to goal
+                                new_plan = self.bfs_nav_plan(detected, self.goal_pos)
+                                if new_plan:
+                                    self.action_queue = new_plan
+
                     self.avatar_pos = detected
                 elif self.avatar_pos is not None and self.prev_action in (
                     GameAction.ACTION1, GameAction.ACTION2, GameAction.ACTION3, GameAction.ACTION4
@@ -2024,7 +2036,22 @@ class MyAgent(Agent):
                     attempted = (self.avatar_pos[0] + dr, self.avatar_pos[1] + dc)
                     self.obstacle_map[attempted] = True
                     print(f"[ORACLE] blocked at {attempted}")
+                    if self.game_mode == "NAV" and self.goal_pos is not None and not self.detected_box_positions:
+                        self.action_queue.clear()
             self.uip_frame_before = current_frame.copy()
+
+            # ── CARD REVEAL OBSERVER (FIX 2) ─────────────────────────────────
+            if self.prev_action == GameAction.ACTION6 and self.last_card_clicked is not None and self.prev_frame is not None:
+                diff = np.abs(current_frame.astype(int) - self.prev_frame.astype(int))
+                if np.sum(diff > 0) > 0:
+                    bg_val = get_background_color(current_frame)
+                    delta_colors = current_frame[diff > 0]
+                    valid_cols = [int(c) for c in delta_colors if int(c) != bg_val]
+                    if valid_cols:
+                        from collections import Counter
+                        dom_col = Counter(valid_cols).most_common(1)[0][0]
+                        self.card_memory[self.last_card_clicked] = dom_col
+                        print(f"[CARD_MEMORY] {self.last_card_clicked} -> color {dom_col} (total={len(self.card_memory)})")
 
             # ── CONCRETE GOAL & SOKOBAN DETECTION ─────────────────────────
             if self.goal_pos is None:
@@ -2245,12 +2272,14 @@ class MyAgent(Agent):
             if self.phase == "VALVES" and not self.action_queue:
                 if self.is_win(latest_frame):
                     return self._handle_win(latest_frame)
-                valves = sorted([p for p in self.responsive_buttons if (p[0] >= 54 or p[0] <= 10 or p[1] >= 54 or p[1] <= 10) and 4 <= p[0] <= 61 and 4 <= p[1] <= 61], key=lambda p: (p[1], p[0]))
-                if len(valves) >= 2:
+                comps_cur = get_components(f, bg, max_area=600)
+                valves_c = [c for c in comps_cur if (c['cx'] >= 54 or c['cx'] <= 10 or c['cy'] >= 54 or c['cy'] <= 10) and 4 <= c['area'] <= 80 and 0 <= c['cx'] < 64 and 0 <= c['cy'] < 64]
+                if len(valves_c) >= 2:
+                    v_sorted = sorted([(c['cx'], c['cy']) for c in valves_c], key=lambda p: (p[1], p[0]))
                     for _ in range(8):
-                        self.action_queue.append((GameAction.ACTION6, {"x": valves[1][0], "y": valves[1][1]}))
+                        self.action_queue.append((GameAction.ACTION6, {"x": int(v_sorted[-1][0]), "y": int(v_sorted[-1][1])}))
                     for _ in range(8):
-                        self.action_queue.append((GameAction.ACTION6, {"x": valves[0][0], "y": valves[0][1]}))
+                        self.action_queue.append((GameAction.ACTION6, {"x": int(v_sorted[0][0]), "y": int(v_sorted[0][1])}))
 
             # ==================================================================
             # TOGGLE SEARCH STEPPING
@@ -2285,6 +2314,37 @@ class MyAgent(Agent):
                 plan = self._build_herding_dog_plan(f, bg)
                 if plan:
                     self.action_queue = plan
+
+            # ==================================================================
+            # CARD MATCH PAIRWISE PLANNER (FIX 2: sc25, sk48, tn36, vc33)
+            # ==================================================================
+            if has_click and not has_dir and not self.action_queue and self.game_mode in ("CLICK", "UNKNOWN"):
+                if self.is_win(latest_frame):
+                    return self._handle_win(latest_frame)
+
+                col_map: Dict[int, Tuple[int, int]] = {}
+                match_pair = None
+                for coord, col in list(self.card_memory.items()):
+                    if col in col_map:
+                        match_pair = (col_map[col], coord)
+                        break
+                    col_map[col] = coord
+
+                if match_pair is not None:
+                    c1, c2 = match_pair
+                    print(f"[CARD_MATCH] Found pair for color {self.card_memory[c1]}: {c1} & {c2}")
+                    del self.card_memory[c1]
+                    del self.card_memory[c2]
+                    self.action_queue = [
+                        (GameAction.ACTION6, {"x": int(c1[0]), "y": int(c1[1])}),
+                        (GameAction.ACTION6, {"x": int(c2[0]), "y": int(c2[1])})
+                    ]
+                elif self.unrevealed_cards:
+                    avail = [c for c in self.unrevealed_cards if c not in self.card_memory]
+                    if avail:
+                        next_c = avail[0]
+                        self.last_card_clicked = next_c
+                        self.action_queue = [(GameAction.ACTION6, {"x": int(next_c[0]), "y": int(next_c[1])})]
 
             # ==================================================================
             # HYBRID A* SOKOBAN & BFS NAVIGATION PLANNER (LAYER 5)
