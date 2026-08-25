@@ -61,7 +61,7 @@ def markdown_cell(source: str) -> dict:
 def build() -> dict:
     if not AGENT_SRC.exists():
         raise SystemExit(f"Could not find {AGENT_SRC}")
-    agent_body = AGENT_SRC.read_text()
+    agent_body = AGENT_SRC.read_text(encoding="utf-8")
 
     install_cell = code_cell(
         "!pip install --no-index --find-links \\\n"

@@ -2722,19 +2722,44 @@ class MyAgent(Agent):
                         self.phase = "EXECUTE"
 
             # ==================================================================
-            # VALVES PULSING STEPPING
+            # CONTINUOUS MULTI-LEVEL DYNAMIC DISPATCH (STENCIL, VALVES, GF2)
             # ==================================================================
-            if self.phase == "VALVES" and not self.action_queue:
+            if has_click and not has_dir and not self.action_queue:
                 if self.is_win(latest_frame):
                     return self._handle_win(latest_frame)
-                comps_cur = get_components(f, bg, max_area=600)
-                valves_c = [c for c in comps_cur if (c['cx'] >= 54 or c['cx'] <= 10 or c['cy'] >= 54 or c['cy'] <= 10) and 4 <= c['area'] <= 80 and 0 <= c['cx'] < 64 and 0 <= c['cy'] < 64]
-                if len(valves_c) >= 2:
-                    v_sorted = sorted([(c['cx'], c['cy']) for c in valves_c], key=lambda p: (p[1], p[0]))
-                    for _ in range(8):
-                        self.action_queue.append((GameAction.ACTION6, {"x": int(v_sorted[-1][0]), "y": int(v_sorted[-1][1])}))
-                    for _ in range(8):
-                        self.action_queue.append((GameAction.ACTION6, {"x": int(v_sorted[0][0]), "y": int(v_sorted[0][1])}))
+
+                # 1. Cellular Stencil Matching (ft09 continuous)
+                stencil_plan = self._build_cellular_stencil_plan(f, bg)
+                if stencil_plan:
+                    self.action_queue = stencil_plan
+
+                # 2. Perimeter Conduit Valves (vc33 continuous)
+                if not self.action_queue:
+                    comps_cur = get_components(f, bg, max_area=600)
+                    valves_c = [c for c in comps_cur if (c['cx'] >= 54 or c['cx'] <= 10 or c['cy'] >= 54 or c['cy'] <= 10) and 4 <= c['area'] <= 80 and 0 <= c['cx'] < 64 and 0 <= c['cy'] < 64]
+                    if len(valves_c) >= 2:
+                        v_sorted = sorted([(c['cx'], c['cy']) for c in valves_c], key=lambda p: (p[1], p[0]))
+                        for vx, vy in v_sorted:
+                            for _ in range(8):
+                                self.action_queue.append((GameAction.ACTION6, {"x": int(vx), "y": int(vy)}))
+
+                # 3. GF(2) Matrix Stencil Solver (g50t, cn04 continuous)
+                if not self.action_queue:
+                    button_cluster = [c for c in get_components(f, bg, max_area=120) if 1 <= c['area'] <= 120 and 0 <= c['cx'] <= 63 and 0 <= c['cy'] <= 63]
+                    cands = sorted([(c['cx'], c['cy']) for c in button_cluster], key=lambda b: (b[1], b[0]))
+                    if len(cands) >= 4:
+                        N = len(cands)
+                        A_stencil = np.zeros((N, N), dtype=int)
+                        for j, (bx, by) in enumerate(cands):
+                            for i, (tx, ty) in enumerate(cands):
+                                if abs(bx - tx) <= 10 and abs(by - ty) <= 10 and (abs(bx - tx) == 0 or abs(by - ty) == 0):
+                                    A_stencil[i, j] = 1
+                        b_stencil = np.ones(N, dtype=int)
+                        sol = solve_gfk_system(A_stencil, b_stencil, k=2)
+                        if sol is not None:
+                            for idx, count in enumerate(sol):
+                                if count % 2 == 1:
+                                    self.action_queue.append((GameAction.ACTION6, {"x": int(cands[idx][0]), "y": int(cands[idx][1])}))
 
             # ==================================================================
             # TOGGLE SEARCH STEPPING
