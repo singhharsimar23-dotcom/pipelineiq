@@ -10,6 +10,7 @@ class Triple:
     state_before: AbstractState
     action: int
     state_after: AbstractState
+    click_coords: Optional[Tuple[int, int]] = None
 
 
 @dataclass
@@ -23,6 +24,8 @@ class ProbeResult:
     goal_ids: List[int] = field(default_factory=list)
     dead_signatures: Set[int] = field(default_factory=set)
     steps_used: int = 0
+    is_click_game: bool = False
+    interactive_clicks: List[Tuple[int, int]] = field(default_factory=list)
 
 
 class ProbeStateMachine:
@@ -33,9 +36,10 @@ class ProbeStateMachine:
         self._done = False
         self._steps = 0
 
-        # Internal state
+        # Internal tracking
         self._last_state: Optional[AbstractState] = None
         self._last_action: Optional[int] = None
+        self._last_coords: Optional[Tuple[int, int]] = None
         self._initialized = False
 
         # EXP0 state
@@ -46,24 +50,15 @@ class ProbeStateMachine:
         self._exp1_idx = 0
         self._exp1_done = False
 
-        # EXP2 state (interactive entity probing)
+        # EXP2 state (interactive click probing for click games)
         self._exp2_entities: List[int] = []
         self._exp2_idx = 0
         self._exp2_done = False
 
         # EXP3 state (toggle detection)
-        self._exp3_candidates: List[int] = []
+        self._exp3_actions = [5, 6, 7]
         self._exp3_idx = 0
-        self._exp3_press_count = 0
-        self._exp3_state0_hash: Optional[int] = None
-        self._exp3_first_hash: Optional[int] = None
-        self._exp3_current_eid: Optional[int] = None
         self._exp3_done = False
-
-        # EXP4 state (special actions)
-        self._exp4_actions = [5, 6, 7]
-        self._exp4_idx = 0
-        self._exp4_done = False
 
     def is_done(self) -> bool:
         return self._done
@@ -76,7 +71,12 @@ class ProbeStateMachine:
             return
 
         if self._last_action is not None and self._last_state is not None:
-            triple = Triple(self._last_state, self._last_action, state)
+            triple = Triple(
+                state_before=self._last_state,
+                action=self._last_action,
+                state_after=state,
+                click_coords=self._last_coords
+            )
             self.triples.append(triple)
             self._process_triple(triple)
             self._last_state = state
@@ -84,8 +84,8 @@ class ProbeStateMachine:
     def _process_triple(self, triple: Triple):
         s0, action, s1 = triple.state_before, triple.action, triple.state_after
 
-        # EXP1: Avatar detection from position changes
-        if not self._exp1_done and action in [1, 2, 3, 4]:
+        # Directional motion check
+        if action in [1, 2, 3, 4]:
             for eid in s0.entities:
                 if eid not in s1.entities:
                     continue
@@ -93,38 +93,23 @@ class ProbeStateMachine:
                 p1 = s1.entities[eid].position
                 disp = max(abs(p1[0] - p0[0]), abs(p1[1] - p0[1]))
                 if disp > 0:
-                    self.result.avatar_id = eid
-                    self.result.step_size = disp
-                    try:
-                        from .abstract_state import _extractor
-                        _extractor.mark_avatar(eid)
-                    except Exception:
-                        pass
-                    break
+                    if self.result.avatar_id is None:
+                        self.result.avatar_id = eid
+                        self.result.step_size = disp
+                        try:
+                            from .abstract_state import _extractor
+                            _extractor.mark_avatar(eid)
+                        except Exception:
+                            pass
+                    elif eid != self.result.avatar_id:
+                        self.result.push_entities.add(eid)
 
-        # EXP2: Entity classification
-        if self._exp1_done and not self._exp2_done and action in [1, 2, 3, 4]:
-            if self.result.avatar_id is not None:
-                av = self.result.avatar_id
-                avatar_moved = (
-                    av in s0.entities
-                    and av in s1.entities
-                    and s0.entities[av].position != s1.entities[av].position
-                )
-                for eid in self._exp2_entities:
-                    if eid == av:
-                        continue
-                    if eid in s0.entities and eid in s1.entities:
-                        if s0.entities[eid].position != s1.entities[eid].position:
-                            self.result.push_entities.add(eid)
-                        elif not avatar_moved:
-                            self.result.wall_entities.add(eid)
-
-        # EXP3 & EXP4: Toggle detection and special action tracking
+        # Click interaction & Toggle detection
         if action in [5, 6, 7]:
             if s1.state_hash != s0.state_hash:
                 self.result.active_special_actions.add(action)
-                # Check for color/state toggle on entities
+                if triple.click_coords:
+                    self.result.interactive_clicks.append(triple.click_coords)
                 for eid in s0.entities:
                     if eid in s1.entities and s0.entities[eid].color != s1.entities[eid].color:
                         self.result.toggle_map[eid] = 2
@@ -134,46 +119,45 @@ class ProbeStateMachine:
             self._finalize(state)
             return None
 
-        # EXP1: find avatar
+        # EXP1: Directional Probe
         if not self._exp1_done:
             if self._exp1_idx >= len(self._exp1_directions):
                 self._exp1_done = True
                 self._exp2_entities = [eid for eid in state.entities if eid != self.result.avatar_id]
+                # If no avatar moved during directional probe, flag as click puzzle
+                if self.result.avatar_id is None:
+                    self.result.is_click_game = True
             else:
                 action = self._exp1_directions[self._exp1_idx]
                 self._exp1_idx += 1
                 self._last_action = action
+                self._last_coords = None
                 self._steps += 1
                 return action
 
-        # EXP2: classify entities
-        if self._exp1_done and not self._exp2_done:
-            if self._exp2_idx >= min(3, len(self._exp2_entities)) or self._steps >= self.budget - 4:
+        # EXP2: Interactive component click probe
+        if self.result.is_click_game and not self._exp2_done:
+            if self._exp2_idx >= min(4, len(self._exp2_entities)) or self._steps >= self.budget:
                 self._exp2_done = True
-                self._exp3_candidates = list(self.result.wall_entities)[:3]
             else:
                 eid = self._exp2_entities[self._exp2_idx]
                 self._exp2_idx += 1
                 entity = state.entities.get(eid)
-                avatar = state.entities.get(self.result.avatar_id) if self.result.avatar_id else None
-                if entity and avatar:
-                    dx = entity.position[0] - avatar.position[0]
-                    dy = entity.position[1] - avatar.position[1]
-                    action = (4 if dx > 0 else 3) if abs(dx) > abs(dy) else (2 if dy > 0 else 1)
-                    self._last_action = action
+                if entity:
+                    self._last_action = 6
+                    self._last_coords = entity.position
                     self._steps += 1
-                    return action
-                else:
-                    return self.get_next_action(state)
+                    return 6
 
-        # EXP3 / EXP4: special action vocabulary
-        if not self._exp4_done:
-            if self._exp4_idx >= len(self._exp4_actions) or self._steps >= self.budget:
-                self._exp4_done = True
+        # EXP3: Special actions
+        if not self._exp3_done:
+            if self._exp3_idx >= len(self._exp3_actions) or self._steps >= self.budget:
+                self._exp3_done = True
             else:
-                action = self._exp4_actions[self._exp4_idx]
-                self._exp4_idx += 1
+                action = self._exp3_actions[self._exp3_idx]
+                self._exp3_idx += 1
                 self._last_action = action
+                self._last_coords = None
                 self._steps += 1
                 return action
 
@@ -192,7 +176,6 @@ class ProbeStateMachine:
         classified |= self.result.push_entities
         classified |= self.result.wall_entities
 
-        # Goals = entities present on frame 0, not classified as avatar/push/wall
         self.result.goal_ids = [
             eid for eid in self._all_initial_entity_ids if eid not in classified
         ][:5]
@@ -218,9 +201,13 @@ def probe_and_collect(env, budget: int = None) -> Tuple[List[Triple], ProbeResul
         from arcengine import GameAction
         data = {}
         if action == 6:
-            data = {"x": 32, "y": 32}
+            coords = sm._last_coords or (32, 32)
+            data = {"x": int(coords[0]), "y": int(coords[1])}
         game_act = GameAction.from_id(action)
-        fd_new = env.step(game_act, data=data)
+        try:
+            fd_new = env.step(game_act, data=data)
+        except Exception:
+            break
         new_frame = np.array(fd_new.frame[0]) if hasattr(fd_new, "frame") and fd_new.frame else frame_prev
         new_state = abstract_state(new_frame, frame_prev)
         sm.process_observation(new_state)

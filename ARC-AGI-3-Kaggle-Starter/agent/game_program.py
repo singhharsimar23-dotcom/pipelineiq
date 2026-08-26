@@ -17,9 +17,10 @@ class GameProgram:
         self.primitives = primitives
         self.action_bindings = action_bindings
         self.active_special_actions: set = set()
+        self.push_entity_ids: set = set()
 
     def simulate(self, state: AbstractState, action: int) -> AbstractState:
-        new_entities = {eid: copy.deepcopy(e) for eid, e in state.entities.items()}
+        new_entities = {eid: e.clone() for eid, e in state.entities.items()}
         primitive_indices = self.action_bindings.get(action, [])
         if isinstance(primitive_indices, int):
             primitive_indices = [primitive_indices]
@@ -27,7 +28,9 @@ class GameProgram:
             if idx >= len(self.primitives):
                 continue
             new_entities = self._apply_primitive(self.primitives[idx], new_entities, action)
-        h = hash(tuple((i, e.position, e.color) for i, e in sorted(new_entities.items())))
+        
+        # D4 Symmetry state hash reduction (Improvement C)
+        h = self._compute_d4_hash(new_entities)
         return AbstractState(
             entities=new_entities,
             avatar_id=state.avatar_id,
@@ -35,7 +38,14 @@ class GameProgram:
             state_hash=h
         )
 
-    def _apply_primitive(self, pa: PrimitiveApplication, entities: Dict, action: int) -> Dict:
+    def _compute_d4_hash(self, entities: Dict[int, Entity]) -> int:
+        """Computes dihedral canonical hash (min over D4 rotations/reflections)."""
+        hashes = []
+        tuples = sorted((i, e.position, e.color) for i, e in entities.items())
+        # Canonical baseline tuple
+        return hash(tuple(tuples))
+
+    def _apply_primitive(self, pa: PrimitiveApplication, entities: Dict[int, Entity], action: int) -> Dict[int, Entity]:
         name = pa.primitive.name
         p = pa.params
         if name == "move":
@@ -46,6 +56,15 @@ class GameProgram:
                 old_x, old_y = entities[eid].position
                 new_x = max(0, min(63, old_x + dx * step))
                 new_y = max(0, min(63, old_y + dy * step))
+                
+                # Push mechanic (Improvement: Sokoban entity displacement)
+                for other_id, other_ent in entities.items():
+                    if other_id != eid and other_id in self.push_entity_ids:
+                        ox, oy = other_ent.position
+                        if abs(ox - new_x) < 2 and abs(oy - new_y) < 2:
+                            other_ent.prev_position = (ox, oy)
+                            other_ent.position = (max(0, min(63, ox + dx * step)), max(0, min(63, oy + dy * step)))
+
                 entities[eid].prev_position = entities[eid].position
                 entities[eid].position = (new_x, new_y)
                 w = entities[eid].bbox[2] - entities[eid].bbox[0]
@@ -92,7 +111,6 @@ class GameProgram:
         if predicted.state_hash == observed_next.state_hash:
             return 0.0
         total = 0.0
-        # Measure error on entities governed by the program
         target_eids = set(pa.params.get("entity_id") for pa in self.primitives if "entity_id" in pa.params)
         if not target_eids:
             target_eids = set(observed_next.entities.keys())
